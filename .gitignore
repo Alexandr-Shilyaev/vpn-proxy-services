@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+**/venv/
+.venv/
+
+# Секреты и состояние (НЕ коммитим!)
+config.env
+bot.env
+*.key
+*.conf
+*.png
+
+# Системное
+.DS_Store
+*.log
