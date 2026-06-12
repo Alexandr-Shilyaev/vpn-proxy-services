@@ -42,6 +42,12 @@ rand_int() {
   echo $(( (RANDOM * 32768 + RANDOM) % range + min ))
 }
 
+# Случайная hex-строка из N байт (по умолчанию 4). Для сигнатур обфускации.
+rand_hex() {
+  local n="${1:-4}"
+  od -An -tx1 -N "${n}" /dev/urandom | tr -d ' \n'
+}
+
 # Валидация имени клиента: латиница, цифры, _ и -, до 32 символов.
 validate_name() {
   local name="$1"

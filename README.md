@@ -54,9 +54,17 @@ sudo ./setup.sh --token <BOT_TOKEN> --admins <ваш_telegram_id>
 # выбрать протоколы (по мере реализации) и сетевые параметры
 sudo ./setup.sh --token XXX --admins 12345 --protocols amneziawg --port 51820 --ip 203.0.113.10
 
+# сетевые параметры AmneziaWG: MTU, IPv6, DNS (пробрасываются в install_server.sh)
+sudo ./setup.sh --token XXX --admins 12345 --mtu 1280 --ipv6 auto --dns 1.1.1.1,1.0.0.1
+
 # только серверы протоколов, без бота
 sudo ./setup.sh --no-bot
 ```
+
+По умолчанию AmneziaWG ставится в формате **2.0** (имитация протокола); для старых клиентов
+добавьте `--legacy`. Сетевые опции (`--mtu`, `--subnet6`, `--ipv6 auto|on|off`, `--legacy`,
+`--port`, `--subnet`, `--dns`, `--ip`, `--iface`) пробрасываются в установщик протокола —
+подробности в [`amneziawg/README.md`](amneziawg/README.md).
 
 Токен/админов можно не передавать флагами — скрипт спросит интерактивно.
 
