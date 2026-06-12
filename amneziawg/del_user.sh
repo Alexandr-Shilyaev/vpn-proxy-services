@@ -16,6 +16,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 need_root
 load_server_env
 need_cmd awg
+need_cmd awg-quick
 
 NAME="${1:-}"
 [[ -n "${NAME}" ]] || die "Укажи имя клиента: del_user.sh <имя>"

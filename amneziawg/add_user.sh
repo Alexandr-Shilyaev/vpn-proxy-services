@@ -24,6 +24,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 need_root
 load_server_env
 need_cmd awg
+need_cmd awg-quick
 need_cmd qrencode
 
 # Дефолты для значений, появившихся в новых версиях (старый server.env их не содержит).

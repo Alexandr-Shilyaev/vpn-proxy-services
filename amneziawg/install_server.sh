@@ -64,9 +64,19 @@ install_packages() {
   log "Устанавливаю зависимости и AmneziaWG…"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
-  apt-get install -y software-properties-common python3-launchpadlib \
-                     gnupg2 curl qrencode iptables "linux-headers-$(uname -r)" || \
-    apt-get install -y software-properties-common gnupg2 curl qrencode iptables
+
+  # Базовые зависимости — должны установиться (иначе дальше идти нельзя):
+  #   software-properties-common + python3-launchpadlib — для add-apt-repository (PPA);
+  #   curl + ca-certificates — определение публичного IP по HTTPS;
+  #   iproute2 — команда `ip` (на минимальных образах бывает не предустановлена);
+  #   gnupg2, qrencode, iptables — ключи репозитория, QR, NAT.
+  apt-get install -y software-properties-common python3-launchpadlib gnupg2 \
+                     curl ca-certificates iproute2 qrencode iptables
+
+  # Заголовки ядра для сборки модуля AmneziaWG (DKMS) — отдельно и best-effort:
+  # их отсутствие не должно ронять установку базовых пакетов, но модуль тогда может не собраться.
+  apt-get install -y "linux-headers-$(uname -r)" || \
+    warn "Не удалось поставить linux-headers-$(uname -r) — модуль AmneziaWG может не собраться (нужен KVM-VPS)."
 
   # PPA Amnezia добавляем всегда (идемпотентно), затем ставим/ОБНОВЛЯЕМ до последней версии.
   # Важно: даже если awg уже стоит — тянем апгрейд, иначе старый 1.x-модуль не примет формат 2.0.

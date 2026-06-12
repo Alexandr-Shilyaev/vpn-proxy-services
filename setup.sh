@@ -101,7 +101,9 @@ fi
 
 log "Готовлю окружение бота…"
 export DEBIAN_FRONTEND=noninteractive
-apt-get install -y python3-venv python3-pip >/dev/null
+apt-get update -y >/dev/null
+# python3-venv тянет python3; python3-pip — на случай отдельной сборки колёс.
+apt-get install -y python3 python3-venv python3-pip >/dev/null
 
 VENV="${INSTALL_DIR}/bot/venv"
 python3 -m venv "${VENV}"
