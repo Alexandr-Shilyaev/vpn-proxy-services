@@ -91,32 +91,36 @@ install_packages() {
   need_cmd awg
   need_cmd awg-quick
   need_cmd qrencode
-  log "Установлено: $(awg --version 2>/dev/null | head -n1)"
+  log "Установлено: amneziawg-tools $(dpkg-query -W -f='${Version}' amneziawg-tools 2>/dev/null || echo '?')"
 }
 
-# Достаёт дату-версию YYYYMMDD из вывода `awg --version` (схема amneziawg-tools: 1.0.YYYYMMDD).
-awg_version_date() {
-  # || true: при отсутствии совпадения grep вернёт 1, иначе set -e уронил бы скрипт до проверки.
-  awg --version 2>/dev/null | grep -oE '20[0-9]{6}' | head -n1 || true
+# Достаёт максимальную дату-версию (YYYYMMDD) из версии deb-пакета amneziawg-tools.
+# ВАЖНО: `awg --version` показывает базовую дату форка wireguard-tools (1.0.20210914) и НЕ
+# меняется между релизами — по ней нельзя судить о 2.0. Реальный релиз виден в версии пакета:
+#   1.0.20210914-0~202602231231+5d6179a~ubuntu24.04.1  ← дата сборки 2026-02-23 = релиз 2.0.
+# Берём максимальную из всех дат строки версии — она и отражает фактический релиз.
+awg_pkg_date() {
+  dpkg-query -W -f='${Version}' amneziawg-tools 2>/dev/null \
+    | grep -oE '20[0-9]{6}' | sort -rn | head -n1 || true
 }
 
 # Гарантирует, что для формата 2.0 установлены tools >= AWG2_MIN_DATE. Иначе — падаем с инструкцией.
 ensure_awg_version() {
   [[ "${AWG_MODE}" == "v2" ]] || return 0
-  local d; d="$(awg_version_date)"
+  local d; d="$(awg_pkg_date)"
   if [[ -z "${d}" ]]; then
-    warn "Не удалось прочитать версию AmneziaWG-tools из 'awg --version'."
+    warn "Не удалось прочитать версию пакета amneziawg-tools (dpkg-query)."
     warn "Если служба не поднимется — обнови пакеты или переустанови с --legacy."
     return 0
   fi
   if [[ "${d}" -lt "${AWG2_MIN_DATE}" ]]; then
-    err "AmneziaWG-tools версии ${d}, а для формата 2.0 нужна >= ${AWG2_MIN_DATE} (релиз 2.0)."
+    err "Сборка amneziawg-tools ${d}, а для формата 2.0 нужна >= ${AWG2_MIN_DATE} (релиз 2.0)."
     err "Обнови до 2.0:"
     err "  sudo add-apt-repository ppa:amnezia/ppa && sudo apt-get update"
     err "  sudo apt-get install --only-upgrade -y amneziawg amneziawg-tools"
     die "…или переустанови в совместимом режиме 1.x:  sudo ./install_server.sh --legacy"
   fi
-  log "AmneziaWG-tools ${d} — формат 2.0 поддерживается."
+  log "amneziawg-tools (сборка ${d}) — формат 2.0 поддерживается."
 }
 
 # Определяет итоговый AWG_MODE ДО записи состояния и проверки версии:
