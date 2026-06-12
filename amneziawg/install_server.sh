@@ -22,6 +22,11 @@
 #   --ipv6 <mode>   auto|on|off — туннелировать IPv6 (по умолчанию auto: если есть у сервера)
 #   --legacy        старый формат обфускации AmneziaWG 1.x (для старых клиентов «Legacy»);
 #                   по умолчанию генерируется формат AmneziaWG 2.0 (имитация протокола, CPS)
+#   split-tunnel по умолчанию для всех клиентов (увести сети МИМО VPN):
+#   --exclude-country <cc>  страны, напр. ru («весь рунет напрямую»)
+#   --exclude-asn <as>      автономные системы, напр. AS47541
+#   --exclude <cidr>        произвольные подсети
+#   --aggregate <N>         огрублять v4-исключения до /N → меньше диапазонов в конфиге
 #
 # Повторный запуск безопасен: если сервер уже настроен, ключи/параметры не перегенерируются.
 
@@ -39,6 +44,11 @@ IPV6_MODE="auto"         # auto|on|off
 AWG_MODE="v2"            # v2 (AmneziaWG 2.0) | legacy (старый формат 1.x, флаг --legacy)
 LEGACY_FORCED=0          # был ли явно передан --legacy
 AWG2_MIN_DATE="20250901" # минимальная версия amneziawg-tools с поддержкой формата 2.0
+# split-tunnel по умолчанию для ВСЕХ клиентов (наследуется ботом). Пусто = весь трафик в VPN.
+EXCLUDE_COUNTRIES=""     # страны мимо VPN, напр. ru («весь рунет напрямую»)
+EXCLUDE_ASNS=""          # ASN мимо VPN, напр. AS47541
+EXCLUDE_CIDRS=""         # подсети мимо VPN
+EXCLUDE_AGGREGATE="0"    # огрублять v4-исключения до /N (меньше диапазонов; 0 = точно)
 SERVER_IP=""             # публичный IP/домен; если пусто — определим автоматически
 
 while [[ $# -gt 0 ]]; do
@@ -50,6 +60,10 @@ while [[ $# -gt 0 ]]; do
     --subnet6) WG_SUBNET6="$2"; shift 2 ;;
     --ipv6)    IPV6_MODE="$2"; shift 2 ;;
     --legacy)  AWG_MODE="legacy"; LEGACY_FORCED=1; shift ;;
+    --exclude-country) EXCLUDE_COUNTRIES="${EXCLUDE_COUNTRIES:+${EXCLUDE_COUNTRIES},}$2"; shift 2 ;;
+    --exclude-asn)     EXCLUDE_ASNS="${EXCLUDE_ASNS:+${EXCLUDE_ASNS},}$2"; shift 2 ;;
+    --exclude)         EXCLUDE_CIDRS="${EXCLUDE_CIDRS:+${EXCLUDE_CIDRS},}$2"; shift 2 ;;
+    --aggregate)       EXCLUDE_AGGREGATE="$2"; shift 2 ;;
     --ip)      SERVER_IP="$2"; shift 2 ;;
     --iface)   WG_IFACE="$2"; WG_CONF="${WG_DIR}/${WG_IFACE}.conf"; shift 2 ;;
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -216,6 +230,10 @@ init_state() {
     : "${AWG_S3:=}"
     : "${AWG_S4:=}"
     : "${AWG_I1:=}"
+    : "${EXCLUDE_COUNTRIES:=}"
+    : "${EXCLUDE_ASNS:=}"
+    : "${EXCLUDE_CIDRS:=}"
+    : "${EXCLUDE_AGGREGATE:=0}"
     return
   fi
 
@@ -235,6 +253,11 @@ WG_SUBNET6="${WG_SUBNET6}"
 WG_DNS="${WG_DNS}"
 WG_MTU="${WG_MTU}"
 IPV6_ENABLED="${IPV6_ENABLED}"
+# --- split-tunnel: исключения по умолчанию для всех клиентов ---
+EXCLUDE_COUNTRIES="${EXCLUDE_COUNTRIES}"
+EXCLUDE_ASNS="${EXCLUDE_ASNS}"
+EXCLUDE_CIDRS="${EXCLUDE_CIDRS}"
+EXCLUDE_AGGREGATE="${EXCLUDE_AGGREGATE}"
 SERVER_PRIVKEY="${SERVER_PRIVKEY}"
 SERVER_PUBKEY="${SERVER_PUBKEY}"
 # --- параметры обфускации (одинаковые у сервера и клиентов) ---

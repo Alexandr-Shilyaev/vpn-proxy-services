@@ -9,10 +9,18 @@
 #   - рисует QR-код (.png) для импорта в приложении Amnezia / AmneziaWG.
 #
 # Использование:
-#   sudo ./add_user.sh <имя_клиента> [--dns 1.1.1.1,8.8.8.8] [--mtu 1280]
+#   sudo ./add_user.sh <имя_клиента> [--dns ...] [--mtu ...]
+#         [--exclude-country ru] [--exclude-asn AS47541] [--exclude 1.2.3.0/24] [--aggregate 16]
 #
-#   --dns <list>  переопределить DNS только для этого клиента (по умолчанию серверный)
-#   --mtu <n>     переопределить MTU только для этого клиента (по умолчанию серверный)
+#   --dns <list>          переопределить DNS только для этого клиента (по умолчанию серверный)
+#   --mtu <n>             переопределить MTU только для этого клиента (по умолчанию серверный)
+#   split-tunnel — увести трафик к этим сетям МИМО VPN (AllowedIPs = всё минус исключения):
+#   --exclude-country <cc>  страны (RIPEstat), напр. ru — «весь рунет напрямую»
+#   --exclude-asn <as>      автономные системы, напр. AS47541
+#   --exclude <cidr>        произвольные подсети, напр. 10.20.0.5/32
+#   --aggregate <N>         огрублять v4-исключения до /N → меньше диапазонов (с допуском)
+#   Дефолты исключений берутся из server.env (EXCLUDE_COUNTRIES/ASNS/CIDRS, AGGREGATE) —
+#   так бот-клиенты тоже наследуют split-tunnel без флагов.
 #
 # Печатает в stdout строку:  CONF=<путь> QR=<путь>
 # (бот парсит её, чтобы отправить файлы в Telegram).
@@ -34,6 +42,11 @@ need_cmd qrencode
 : "${AWG_S3:=}"
 : "${AWG_S4:=}"
 : "${AWG_I1:=}"
+# split-tunnel: глобальные дефолты исключений из server.env (наследуются бот-клиентами).
+: "${EXCLUDE_COUNTRIES:=}"
+: "${EXCLUDE_ASNS:=}"
+: "${EXCLUDE_CIDRS:=}"
+: "${EXCLUDE_AGGREGATE:=0}"
 
 NAME=""
 CLIENT_DNS=""
@@ -42,11 +55,15 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dns) CLIENT_DNS="${2//,/, }"; shift 2 ;;
     --mtu) CLIENT_MTU="$2"; shift 2 ;;
+    --exclude-country) EXCLUDE_COUNTRIES="${EXCLUDE_COUNTRIES:+${EXCLUDE_COUNTRIES},}$2"; shift 2 ;;
+    --exclude-asn)     EXCLUDE_ASNS="${EXCLUDE_ASNS:+${EXCLUDE_ASNS},}$2"; shift 2 ;;
+    --exclude)         EXCLUDE_CIDRS="${EXCLUDE_CIDRS:+${EXCLUDE_CIDRS},}$2"; shift 2 ;;
+    --aggregate)       EXCLUDE_AGGREGATE="$2"; shift 2 ;;
     -*)    die "Неизвестный аргумент: $1" ;;
     *)     [[ -z "${NAME}" ]] && NAME="$1" || die "Лишний аргумент: $1"; shift ;;
   esac
 done
-[[ -n "${NAME}" ]] || die "Укажи имя клиента: add_user.sh <имя> [--dns ...] [--mtu ...]"
+[[ -n "${NAME}" ]] || die "Укажи имя клиента: add_user.sh <имя> [--dns ...] [--mtu ...] [--exclude-* ...]"
 validate_name "${NAME}"
 : "${CLIENT_DNS:=${WG_DNS}}"
 : "${CLIENT_MTU:=${WG_MTU}}"
@@ -105,13 +122,29 @@ awg syncconf "${WG_IFACE}" <(awg-quick strip "${WG_IFACE}")
 CLIENT_CONF="${CLIENT_DIR}/${NAME}.conf"
 log "Формирую клиентский конфиг…"
 
-# Адрес клиента и маршрутизируемые сети: IPv6 добавляем только если он включён на сервере,
-# иначе ::/0 завернул бы IPv6 в туннель, где его некуда выпустить (чёрная дыра/утечка).
+# Адрес клиента (его собственный IP в туннеле) — не зависит от split-tunnel.
 CLIENT_ADDR="${CLIENT_IP}/32"
-CLIENT_ALLOWED="0.0.0.0/0"
-if [[ -n "${CLIENT_IP6}" ]]; then
-  CLIENT_ADDR="${CLIENT_ADDR}, ${CLIENT_IP6}/128"
-  CLIENT_ALLOWED="${CLIENT_ALLOWED}, ::/0"
+[[ -n "${CLIENT_IP6}" ]] && CLIENT_ADDR="${CLIENT_ADDR}, ${CLIENT_IP6}/128"
+
+# Маршруты В туннель (AllowedIPs). По умолчанию — весь трафик; со split-tunnel —
+# весь МИНУС исключаемые сети (страны/ASN/CIDR), посчитанные lib/allowedips.py.
+# IPv6 добавляем только если он включён на сервере (иначе ::/0 — чёрная дыра/утечка).
+if [[ -n "${EXCLUDE_COUNTRIES}${EXCLUDE_ASNS}${EXCLUDE_CIDRS}" ]]; then
+  need_cmd python3
+  log "Считаю split-tunnel (страны='${EXCLUDE_COUNTRIES}' asn='${EXCLUDE_ASNS}' cidr='${EXCLUDE_CIDRS}' aggregate=${EXCLUDE_AGGREGATE})…"
+  ai_out="$(python3 "${SCRIPT_DIR}/lib/allowedips.py" \
+              --countries "${EXCLUDE_COUNTRIES}" --asns "${EXCLUDE_ASNS}" \
+              --cidrs "${EXCLUDE_CIDRS}" --aggregate "${EXCLUDE_AGGREGATE}" \
+              --ipv6 "${IPV6_ENABLED}")" \
+    || die "Не удалось вычислить AllowedIPs (нет сети или RIPEstat недоступен). Создай без исключений или повтори позже."
+  CLIENT_ALLOWED="$(printf '%s\n' "${ai_out}" | sed -n 's/^V4=//p')"
+  ai_v6="$(printf '%s\n' "${ai_out}" | sed -n 's/^V6=//p')"
+  [[ "${IPV6_ENABLED}" -eq 1 && -n "${ai_v6}" ]] && CLIENT_ALLOWED="${CLIENT_ALLOWED}, ${ai_v6}"
+  [[ -n "${CLIENT_ALLOWED}" ]] || die "Пустой AllowedIPs после исключений — проверь параметры."
+  log "split-tunnel: $(printf '%s' "${CLIENT_ALLOWED}" | awk -F, '{print NF}') диапазонов в туннель."
+else
+  CLIENT_ALLOWED="0.0.0.0/0"
+  [[ -n "${CLIENT_IP6}" ]] && CLIENT_ALLOWED="${CLIENT_ALLOWED}, ::/0"
 fi
 
 {
@@ -143,10 +176,15 @@ fi
 chmod 600 "${CLIENT_CONF}"
 
 # ---------- QR-код ----------
+# При split-tunnel AllowedIPs огромный → в QR не влезет. Делаем best-effort:
+# если не вышло, просто нет .png (бот отправит только .conf).
 CLIENT_QR="${CLIENT_DIR}/${NAME}.png"
-qrencode -t PNG -o "${CLIENT_QR}" < "${CLIENT_CONF}"
-# текстовый QR в консоль (удобно при ручном запуске)
-qrencode -t ANSIUTF8 < "${CLIENT_CONF}" || true
+if qrencode -t PNG -o "${CLIENT_QR}" < "${CLIENT_CONF}" 2>/dev/null; then
+  qrencode -t ANSIUTF8 < "${CLIENT_CONF}" 2>/dev/null || true
+else
+  rm -f "${CLIENT_QR}"
+  warn "Конфиг великоват для QR (split-tunnel) — используй файл .conf, без QR."
+fi
 
 log "Клиент '${NAME}' добавлен. IP ${CLIENT_IP}${CLIENT_IP6:+ / ${CLIENT_IP6}}"
 echo "CONF=${CLIENT_CONF} QR=${CLIENT_QR}"
