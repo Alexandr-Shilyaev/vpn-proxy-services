@@ -100,9 +100,54 @@ sudo ./list_users.sh                    # список
 WireGuard к серверу с обфускацией **не подключится**. Для совместимости с ванильным WG обнулите
 параметры обфускации и у сервера, и у клиента.
 
+### Приложения по платформам
+
+| Платформа | Клиент | Примечание |
+|-----------|--------|------------|
+| Windows | [amneziawg-windows-client](https://github.com/amnezia-vpn/amneziawg-windows-client/releases) **≥ 2.0.0** | возьмите сборку **под свою архитектуру** (обычно `amd64`, для ARM-ноутбуков `arm64`) |
+| Android / iOS / macOS | **AmneziaWG / AmneziaVPN 2.0+** | импорт `.conf` или скан QR |
+| Linux | `amneziawg` + `amneziawg-tools` 2.0 | как на сервере |
+
+Импорт: **Import tunnel(s) from file** → выберите `.conf` → **Activate**. QR удобен для телефона,
+на десктопе импортируйте файл `.conf`.
+
+> Ошибка Windows-клиента **«You must use the native version of WireGuard on this computer»** —
+> это **не про конфиг**, а про архитектуру: скачана сборка под другой процессор. Возьмите `amd64`
+> (или `arm64`) под вашу Windows.
+
+## Устранение неполадок
+
+**На WiFi/проводе работает, на мобильной сети «не удалось установить соединение» (нет handshake).**
+Мобильный оператор режет UDP или порт `51820`. Переведите сервер на **443/udp** (его пропускают
+почти всегда — там живёт QUIC):
+
+```bash
+sed -i 's/^ListenPort = .*/ListenPort = 443/' /etc/amnezia/amneziawg/awg0.conf
+sed -i 's/^WG_PORT=.*/WG_PORT="443"/'        /etc/awg-vpn/server.env
+ufw allow 443/udp 2>/dev/null || true
+systemctl restart awg-quick@awg0
+# пересоздать клиента, чтобы в .conf попал новый порт:
+./del_user.sh phone && ./add_user.sh phone
+```
+
+> ⚠️ Откройте **UDP-порт и в облачном firewall хостера** (security group панели VPS) — он
+> **отдельный** от `ufw`. Это частая причина, почему порт «закрыт снаружи».
+
+При установке с нуля можно сразу задать порт: `install_server.sh --port 443` (или `setup.sh --port 443`).
+
+**Handshake есть, но интернета нет** — это MTU. Снизьте в клиентском `.conf` `MTU = 1280` → `1200`
+(если надо — `1100`), либо для всех новых клиентов: `sed -i 's/^WG_MTU=.*/WG_MTU="1200"/' /etc/awg-vpn/server.env`.
+
+**Даже на 443/udp не подключается на мобильной** — оператор глушит **весь UDP**. AmneziaWG (UDP)
+такое не обходит; нужен TCP-протокол на 443 — **VLESS + Reality** (в роадмапе проекта как «база»).
+
+**Служба `awg-quick@awg0` не стартует после установки** — вероятно, модуль AmneziaWG старее 2.0.
+Переустановите с `--legacy` (формат 1.x) или обновите пакеты до 2.0.
+
 ## Источники
 
 - [AmneziaWG 2.0 для self-hosted — анонс Amnezia](https://amnezia.org/ru/blog/amneziawg-2-0-available-for-self-hosted)
 - [AmneziaWG — документация](https://docs.amnezia.org/documentation/amnezia-wg/)
+- [Клиент AmneziaWG для Windows (релизы)](https://github.com/amnezia-vpn/amneziawg-windows-client/releases)
 - [Установка на Ubuntu (EDIS Global)](https://docs.edisglobal.com/advanced-setup-guides/install-amneziawg-on-ubuntu-22_04/install-amneziawg-on-ubuntu-2204)
 - [AmneziaWG 2.0: self-host obfuscated WireGuard (DEV)](https://dev.to/bivlked/amneziawg-20-self-host-an-obfuscated-wireguard-vpn-that-bypasses-dpi-4692)
