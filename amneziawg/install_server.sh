@@ -20,10 +20,14 @@
 #   --iface <name>  имя WG-интерфейса (по умолчанию awg0)
 #   --subnet6 <p>   IPv6 ULA-префикс /64 (по умолчанию fd0a:1ce5:c0de)
 #   --ipv6 <mode>   auto|on|off — туннелировать IPv6 (по умолчанию auto: если есть у сервера)
-#   --legacy        старый формат обфускации AmneziaWG 1.x (для старых клиентов «Legacy»);
-#                   по умолчанию генерируется формат AmneziaWG 2.0 (имитация протокола, CPS)
+#   --awg3          формат обфускации AmneziaWG 3.1 (ПО УМОЛЧАНИЮ): к имитации протокола 2.0
+#                   добавляются шифрование заголовков (HeaderProtectionKey), паддинг контента
+#                   и рандомизированные тайминги. Нужны клиенты 3.1+ (см. README).
+#   --awg2          формат AmneziaWG 2.0 (имитация протокола, CPS) — для клиентов 2.0
+#   --legacy        старый формат AmneziaWG 1.x (для старых клиентов «Legacy»)
 #
 # Повторный запуск безопасен: если сервер уже настроен, ключи/параметры не перегенерируются.
+# Сменить формат на уже работающем сервере: ./migrate.sh --to v3 (клиенты сохраняются).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
@@ -36,9 +40,8 @@ WG_DNS="1.1.1.1, 1.0.0.1"
 WG_MTU="1280"            # ниже стандартных 1420: обфускация добавляет накладные расходы
 WG_SUBNET6="fd0a:1ce5:c0de"  # IPv6 ULA /64 -> сервер ::1, клиенты ::2 ...
 IPV6_MODE="auto"         # auto|on|off
-AWG_MODE="v2"            # v2 (AmneziaWG 2.0) | legacy (старый формат 1.x, флаг --legacy)
-LEGACY_FORCED=0          # был ли явно передан --legacy
-AWG2_MIN_DATE="20250901" # минимальная версия amneziawg-tools с поддержкой формата 2.0
+AWG_MODE="v3"            # v3 (AmneziaWG 3.1) | v2 (2.0) | legacy (1.x)
+MODE_FORCED=0            # был ли формат задан флагом явно
 SERVER_IP=""             # публичный IP/домен; если пусто — определим автоматически
 
 while [[ $# -gt 0 ]]; do
@@ -49,7 +52,9 @@ while [[ $# -gt 0 ]]; do
     --mtu)     WG_MTU="$2"; shift 2 ;;
     --subnet6) WG_SUBNET6="$2"; shift 2 ;;
     --ipv6)    IPV6_MODE="$2"; shift 2 ;;
-    --legacy)  AWG_MODE="legacy"; LEGACY_FORCED=1; shift ;;
+    --awg3)    AWG_MODE="v3"; MODE_FORCED=1; shift ;;
+    --awg2)    AWG_MODE="v2"; MODE_FORCED=1; shift ;;
+    --legacy)  AWG_MODE="legacy"; MODE_FORCED=1; shift ;;
     --ip)      SERVER_IP="$2"; shift 2 ;;
     --iface)   WG_IFACE="$2"; WG_CONF="${WG_DIR}/${WG_IFACE}.conf"; shift 2 ;;
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -85,54 +90,31 @@ install_packages() {
     add-apt-repository -y ppa:amnezia/ppa
   fi
   apt-get update -y
-  log "Ставлю/обновляю amneziawg + amneziawg-tools до последней версии (2.0)…"
+  log "Ставлю/обновляю amneziawg + amneziawg-tools до последней версии (3.1)…"
   apt-get install -y amneziawg amneziawg-tools || apt-get install -y amneziawg
 
   need_cmd awg
   need_cmd awg-quick
   need_cmd qrencode
   log "Установлено: amneziawg-tools $(dpkg-query -W -f='${Version}' amneziawg-tools 2>/dev/null || echo '?')"
-}
-
-# Достаёт максимальную дату-версию (YYYYMMDD) из версии deb-пакета amneziawg-tools.
-# ВАЖНО: `awg --version` показывает базовую дату форка wireguard-tools (1.0.20210914) и НЕ
-# меняется между релизами — по ней нельзя судить о 2.0. Реальный релиз виден в версии пакета:
-#   1.0.20210914-0~202602231231+5d6179a~ubuntu24.04.1  ← дата сборки 2026-02-23 = релиз 2.0.
-# Берём максимальную из всех дат строки версии — она и отражает фактический релиз.
-awg_pkg_date() {
-  dpkg-query -W -f='${Version}' amneziawg-tools 2>/dev/null \
-    | grep -oE '20[0-9]{6}' | sort -rn | head -n1 || true
-}
-
-# Гарантирует, что для формата 2.0 установлены tools >= AWG2_MIN_DATE. Иначе — падаем с инструкцией.
-ensure_awg_version() {
-  [[ "${AWG_MODE}" == "v2" ]] || return 0
-  local d; d="$(awg_pkg_date)"
-  if [[ -z "${d}" ]]; then
-    warn "Не удалось прочитать версию пакета amneziawg-tools (dpkg-query)."
-    warn "Если служба не поднимется — обнови пакеты или переустанови с --legacy."
-    return 0
-  fi
-  if [[ "${d}" -lt "${AWG2_MIN_DATE}" ]]; then
-    err "Сборка amneziawg-tools ${d}, а для формата 2.0 нужна >= ${AWG2_MIN_DATE} (релиз 2.0)."
-    err "Обнови до 2.0:"
-    err "  sudo add-apt-repository ppa:amnezia/ppa && sudo apt-get update"
-    err "  sudo apt-get install --only-upgrade -y amneziawg amneziawg-tools"
-    die "…или переустанови в совместимом режиме 1.x:  sudo ./install_server.sh --legacy"
-  fi
-  log "amneziawg-tools (сборка ${d}) — формат 2.0 поддерживается."
+  log "Модуль (dkms): $(dpkg-query -W -f='${Version}' amneziawg-dkms 2>/dev/null || echo '?')"
 }
 
 # Определяет итоговый AWG_MODE ДО записи состояния и проверки версии:
 #  - существующий сервер -> формат берём из server.env (старый env без поля = legacy);
-#  - свежая установка     -> значение из CLI (v2 по умолчанию, legacy при --legacy).
+#  - свежая установка     -> значение из CLI (v3 по умолчанию).
+# Формат существующего сервера НЕ меняем: это сломало бы все выданные конфиги.
+# Для смены формата есть migrate.sh, который заодно перевыпускает клиентов.
 resolve_mode() {
   [[ -f "${SERVER_ENV}" ]] || return 0   # свежая установка: AWG_MODE уже из CLI
   local stored; stored="$(awk -F'"' '/^AWG_MODE=/{print $2; exit}' "${SERVER_ENV}" 2>/dev/null || true)"
   [[ -n "${stored}" ]] || stored="legacy"
-  if [[ "${LEGACY_FORCED}" -eq 1 && "${stored}" != "legacy" ]]; then
-    warn "Сервер уже установлен в формате '${stored}'. Смена формата требует пересоздания всех клиентов."
-    warn "Для переустановки с нуля удали ${SERVER_ENV} и ${WG_CONF}, затем запусти снова."
+  if [[ "${MODE_FORCED}" -eq 1 && "${stored}" != "${AWG_MODE}" ]]; then
+    warn "Сервер уже установлен в формате '${stored}' — флаг формата игнорируется."
+    warn "Сменить формат с сохранением клиентов:  sudo ./migrate.sh --to ${AWG_MODE}"
+  elif [[ "${stored}" != "v3" ]]; then
+    warn "Сервер работает в формате '${stored}'. Доступен более стойкий 3.1:"
+    warn "  sudo ./migrate.sh --to v3   (клиенты сохраняются, конфиги перевыпускаются)"
   fi
   AWG_MODE="${stored}"
 }
@@ -165,41 +147,7 @@ detect_network() {
   log "IPv6: $([[ "${IPV6_ENABLED}" -eq 1 ]] && echo 'включён' || echo 'выключен')"
 }
 
-# ---------- 3. Параметры обфускации AmneziaWG ----------
-# Должны совпадать у сервера и всех клиентов. Генерируем по логике приложения Amnezia.
-gen_obfuscation() {
-  # H1..H4 — различные «магические» заголовки типов пакетов (нужны в обоих режимах).
-  AWG_H1="$(rand_int 5 2000000000)"
-  AWG_H2="$(rand_int 5 2000000000)"; while [[ "${AWG_H2}" == "${AWG_H1}" ]]; do AWG_H2="$(rand_int 5 2000000000)"; done
-  AWG_H3="$(rand_int 5 2000000000)"; while [[ "${AWG_H3}" == "${AWG_H1}" || "${AWG_H3}" == "${AWG_H2}" ]]; do AWG_H3="$(rand_int 5 2000000000)"; done
-  AWG_H4="$(rand_int 5 2000000000)"; while [[ "${AWG_H4}" == "${AWG_H1}" || "${AWG_H4}" == "${AWG_H2}" || "${AWG_H4}" == "${AWG_H3}" ]]; do AWG_H4="$(rand_int 5 2000000000)"; done
-
-  AWG_S3=""; AWG_S4=""; AWG_I1=""   # есть только у 2.0; в legacy остаются пустыми
-
-  if [[ "${AWG_MODE}" == "legacy" ]]; then
-    # --- AmneziaWG 1.x (Legacy): шумовая обфускация, совместима со старыми клиентами ---
-    AWG_JC="$(rand_int 4 12)"
-    AWG_JMIN="$(rand_int 16 64)"
-    AWG_JMAX="$(rand_int 512 1280)"
-    AWG_S1="$(rand_int 15 150)"
-    AWG_S2="$(rand_int 15 150)"
-    while [[ $(( AWG_S1 + 56 )) -eq "${AWG_S2}" ]]; do AWG_S2="$(rand_int 15 150)"; done  # S1+56 != S2
-  else
-    # --- AmneziaWG 2.0: имитация протокола (CPS) + универсальное заполнение ---
-    AWG_JC="$(rand_int 3 8)"        # кол-во junk-пакетов после I1 (диапазон 0–10)
-    AWG_JMIN="$(rand_int 64 200)"   # размер junk-пакетов (диапазон 64–1024)
-    AWG_JMAX="$(rand_int 400 1024)"
-    AWG_S1="$(rand_int 0 64)"       # префиксы Init/Response/Cookie (0–64)
-    AWG_S2="$(rand_int 0 64)"
-    AWG_S3="$(rand_int 0 64)"
-    AWG_S4="$(rand_int 0 32)"       # префикс Data-пакетов (0–32)
-    # I1 — сигнатурный пакет имитации (CPS): фикс. магия + случайные буквы + время + случайный хвост.
-    # Сервер и клиенты используют ОДНУ И ТУ ЖЕ строку (как и остальные параметры обфускации).
-    AWG_I1="<b 0x$(rand_hex 4)><rc 8><t><r $(rand_int 30 80)>"
-  fi
-}
-
-# ---------- 4. Состояние и ключи ----------
+# ---------- 3. Состояние и ключи ----------
 init_state() {
   mkdir -p "${STATE_DIR}" "${CLIENTS_DIR}" "${WG_DIR}"
   chmod 700 "${STATE_DIR}" "${CLIENTS_DIR}" "${WG_DIR}"
@@ -208,14 +156,7 @@ init_state() {
     warn "Найден существующий ${SERVER_ENV} — повторно использую ключи и параметры обфускации."
     # shellcheck disable=SC1090
     source "${SERVER_ENV}"
-    # Дефолты для значений, появившихся в новых версиях (старый server.env их не содержит).
-    : "${WG_MTU:=1280}"
-    : "${WG_SUBNET6:=fd0a:1ce5:c0de}"
-    : "${IPV6_ENABLED:=0}"
-    : "${AWG_MODE:=legacy}"   # старые установки были в формате 1.x
-    : "${AWG_S3:=}"
-    : "${AWG_S4:=}"
-    : "${AWG_I1:=}"
+    awg_env_defaults   # поля, которых нет в server.env от старых версий
     return
   fi
 
@@ -224,80 +165,21 @@ init_state() {
   SERVER_PUBKEY="$(echo "${SERVER_PRIVKEY}" | awg pubkey)"
   gen_obfuscation
 
-  cat > "${SERVER_ENV}" <<EOF
-# Состояние сервера AmneziaWG. Создано install_server.sh $(date -u +%FT%TZ)
-SERVER_IP="${SERVER_IP}"
-WAN_IFACE="${WAN_IFACE}"
-WG_IFACE="${WG_IFACE}"
-WG_PORT="${WG_PORT}"
-WG_SUBNET="${WG_SUBNET}"
-WG_SUBNET6="${WG_SUBNET6}"
-WG_DNS="${WG_DNS}"
-WG_MTU="${WG_MTU}"
-IPV6_ENABLED="${IPV6_ENABLED}"
-SERVER_PRIVKEY="${SERVER_PRIVKEY}"
-SERVER_PUBKEY="${SERVER_PUBKEY}"
-# --- параметры обфускации (одинаковые у сервера и клиентов) ---
-AWG_MODE="${AWG_MODE}"
-AWG_JC="${AWG_JC}"
-AWG_JMIN="${AWG_JMIN}"
-AWG_JMAX="${AWG_JMAX}"
-AWG_S1="${AWG_S1}"
-AWG_S2="${AWG_S2}"
-AWG_S3="${AWG_S3}"
-AWG_S4="${AWG_S4}"
-AWG_H1="${AWG_H1}"
-AWG_H2="${AWG_H2}"
-AWG_H3="${AWG_H3}"
-AWG_H4="${AWG_H4}"
-AWG_I1="${AWG_I1}"
-EOF
-  chmod 600 "${SERVER_ENV}"
+  write_server_env
 }
 
-# ---------- 5. Серверный конфиг ----------
+# ---------- 4. Серверный конфиг ----------
 write_server_conf() {
   if [[ -f "${WG_CONF}" ]]; then
     warn "Конфиг ${WG_CONF} уже существует — не перезаписываю."
     return
   fi
   log "Создаю ${WG_CONF}…"
-
-  local addr="${WG_SUBNET}.1/24"
-  [[ "${IPV6_ENABLED}" -eq 1 ]] && addr="${addr}, ${WG_SUBNET6}::1/64"
-
-  {
-    echo "[Interface]"
-    echo "Address = ${addr}"
-    echo "ListenPort = ${WG_PORT}"
-    echo "PrivateKey = ${SERVER_PRIVKEY}"
-    echo "MTU = ${WG_MTU}"
-    echo "# NAT и форвардинг включаются при старте/остановке интерфейса"
-    echo "PostUp   = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -s ${WG_SUBNET}.0/24 -o ${WAN_IFACE} -j MASQUERADE"
-    echo "PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -s ${WG_SUBNET}.0/24 -o ${WAN_IFACE} -j MASQUERADE"
-    if [[ "${IPV6_ENABLED}" -eq 1 ]]; then
-      echo "PostUp   = ip6tables -A FORWARD -i %i -j ACCEPT; ip6tables -A FORWARD -o %i -j ACCEPT; ip6tables -t nat -A POSTROUTING -s ${WG_SUBNET6}::/64 -o ${WAN_IFACE} -j MASQUERADE"
-      echo "PostDown = ip6tables -D FORWARD -i %i -j ACCEPT; ip6tables -D FORWARD -o %i -j ACCEPT; ip6tables -t nat -D POSTROUTING -s ${WG_SUBNET6}::/64 -o ${WAN_IFACE} -j MASQUERADE"
-    fi
-    echo ""
-    echo "# --- AmneziaWG: параметры обфускации ---"
-    echo "Jc = ${AWG_JC}"
-    echo "Jmin = ${AWG_JMIN}"
-    echo "Jmax = ${AWG_JMAX}"
-    echo "S1 = ${AWG_S1}"
-    echo "S2 = ${AWG_S2}"
-    [[ -n "${AWG_S3}" ]] && echo "S3 = ${AWG_S3}"
-    [[ -n "${AWG_S4}" ]] && echo "S4 = ${AWG_S4}"
-    echo "H1 = ${AWG_H1}"
-    echo "H2 = ${AWG_H2}"
-    echo "H3 = ${AWG_H3}"
-    echo "H4 = ${AWG_H4}"
-    [[ -n "${AWG_I1}" ]] && echo "I1 = ${AWG_I1}"
-  } > "${WG_CONF}"
+  render_server_iface > "${WG_CONF}"
   chmod 600 "${WG_CONF}"
 }
 
-# ---------- 6. Системные настройки ----------
+# ---------- 5. Системные настройки ----------
 enable_forwarding() {
   log "Включаю IP-форвардинг…"
   cat > /etc/sysctl.d/99-awg-vpn.conf <<'EOF'
@@ -324,10 +206,18 @@ start_service() {
 
   if ! systemctl is-active --quiet "awg-quick@${WG_IFACE}"; then
     err "Служба awg-quick@${WG_IFACE} не запустилась. Логи: journalctl -u awg-quick@${WG_IFACE} -n 30"
-    if [[ "${AWG_MODE}" != "legacy" ]]; then
-      warn "Возможная причина: установленный модуль AmneziaWG старее 2.0 и не понимает формат 2.0 (I1/S3/S4)."
-      warn "Переустанови сервер в совместимом режиме:  sudo ./install_server.sh --legacy  (или удали ${WG_CONF} и повтори)."
-    fi
+    case "${AWG_MODE}" in
+      v3)
+        warn "Возможная причина: модуль/утилиты AmneziaWG старее 3.1 и не понимают параметры"
+        warn "HeaderProtectionKey / RandomTrailers / диапазоны таймеров. Проверь версию модуля:"
+        warn "  cat /sys/module/amneziawg/version ; dpkg-query -W amneziawg-dkms amneziawg-tools"
+        warn "Откат на предыдущий формат: удали ${WG_CONF} и ${SERVER_ENV}, затем запусти с --awg2."
+        ;;
+      v2)
+        warn "Возможная причина: установленный модуль AmneziaWG старее 2.0 и не понимает формат 2.0 (I1/S3/S4)."
+        warn "Переустанови сервер в совместимом режиме:  sudo ./install_server.sh --legacy  (или удали ${WG_CONF} и повтори)."
+        ;;
+    esac
     die "Сервер не поднялся — см. сообщения выше."
   fi
 }
@@ -336,7 +226,7 @@ start_service() {
 install_packages
 detect_network
 resolve_mode          # формат: из server.env (если есть) или из CLI
-ensure_awg_version    # гейт: для формата 2.0 нужны tools >= 2.0 (до записи состояния)
+ensure_awg_version    # гейт: tools/модуль должны понимать выбранный формат (до записи состояния)
 init_state
 write_server_conf
 enable_forwarding
@@ -349,8 +239,13 @@ echo "  Интерфейс : ${WG_IFACE}"
 echo "  Endpoint  : ${SERVER_IP}:${WG_PORT}"
 echo "  Подсеть   : ${WG_SUBNET}.0/24 (сервер ${WG_SUBNET}.1)"
 [[ "${IPV6_ENABLED}" -eq 1 ]] && echo "  IPv6      : ${WG_SUBNET6}::/64 (сервер ${WG_SUBNET6}::1)"
-echo "  Обфускация: $([[ "${AWG_MODE}" == "legacy" ]] && echo 'AmneziaWG 1.x (Legacy)' || echo 'AmneziaWG 2.0 (имитация протокола)')"
+echo "  Обфускация: $(awg_mode_label)"
 echo "  MTU       : ${WG_MTU}"
 echo "  Состояние : ${SERVER_ENV}"
 echo
+if [[ "${AWG_MODE}" == "v3" ]]; then
+  echo "Формату 3.1 нужны клиенты: Amnezia VPN 5.0.1.5+, AmneziaWG для Windows 3.1.0+,"
+  echo "AmneziaWG для Android 3.1+. Клиенты 2.0 к такому серверу не подключатся."
+  echo
+fi
 echo "Дальше: добавляй клиентов командой  sudo ./add_user.sh <имя>"

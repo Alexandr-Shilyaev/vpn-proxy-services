@@ -28,12 +28,7 @@ need_cmd awg-quick
 need_cmd qrencode
 
 # Дефолты для значений, появившихся в новых версиях (старый server.env их не содержит).
-: "${WG_MTU:=1280}"
-: "${WG_SUBNET6:=fd0a:1ce5:c0de}"
-: "${IPV6_ENABLED:=0}"
-: "${AWG_S3:=}"
-: "${AWG_S4:=}"
-: "${AWG_I1:=}"
+awg_env_defaults
 
 NAME=""
 CLIENT_DNS=""
@@ -114,32 +109,8 @@ if [[ -n "${CLIENT_IP6}" ]]; then
   CLIENT_ALLOWED="${CLIENT_ALLOWED}, ::/0"
 fi
 
-{
-  echo "[Interface]"
-  echo "Address = ${CLIENT_ADDR}"
-  echo "DNS = ${CLIENT_DNS}"
-  echo "PrivateKey = ${CLIENT_PRIV}"
-  echo "MTU = ${CLIENT_MTU}"
-  echo "Jc = ${AWG_JC}"
-  echo "Jmin = ${AWG_JMIN}"
-  echo "Jmax = ${AWG_JMAX}"
-  echo "S1 = ${AWG_S1}"
-  echo "S2 = ${AWG_S2}"
-  [[ -n "${AWG_S3}" ]] && echo "S3 = ${AWG_S3}"
-  [[ -n "${AWG_S4}" ]] && echo "S4 = ${AWG_S4}"
-  echo "H1 = ${AWG_H1}"
-  echo "H2 = ${AWG_H2}"
-  echo "H3 = ${AWG_H3}"
-  echo "H4 = ${AWG_H4}"
-  [[ -n "${AWG_I1}" ]] && echo "I1 = ${AWG_I1}"
-  echo ""
-  echo "[Peer]"
-  echo "PublicKey = ${SERVER_PUBKEY}"
-  echo "PresharedKey = ${CLIENT_PSK}"
-  echo "Endpoint = ${SERVER_IP}:${WG_PORT}"
-  echo "AllowedIPs = ${CLIENT_ALLOWED}"
-  echo "PersistentKeepalive = 25"
-} > "${CLIENT_CONF}"
+render_client_conf "${CLIENT_PRIV}" "${CLIENT_PSK}" "${CLIENT_ADDR}" \
+                   "${CLIENT_DNS}" "${CLIENT_MTU}" "${CLIENT_ALLOWED}" > "${CLIENT_CONF}"
 chmod 600 "${CLIENT_CONF}"
 
 # ---------- QR-код ----------

@@ -9,7 +9,8 @@ VLESS+Reality и Hysteria2 добавляются в реестр PROTOCOLS по
   add_user.sh  <имя>  -> печатает строку  CONF=<путь> QR=<путь>
   del_user.sh  <имя>  -> печатает строку  DELETED=<имя>
   list_users.sh       -> таблица (первый столбец — имя) или "Клиентов пока нет."
-  + клиенты хранятся в каталоге state_clients_dir (по одному подкаталогу на клиента)
+  + клиенты хранятся в каталоге clients_dir: по подкаталогу на клиента, внутри
+    <имя>/<имя>.conf и <имя>/<имя>.png — отсюда бот выдаёт конфиг повторно
 
 Конфигурация — через переменные окружения (см. config.env.example):
   BOT_TOKEN    — токен от @BotFather
@@ -125,6 +126,7 @@ def proto_menu(proto: Protocol) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("Добавить пользователя", callback_data=f"add:{proto.key}")],
+            [InlineKeyboardButton("Выдать конфиг заново", callback_data=f"confmenu:{proto.key}")],
             [InlineKeyboardButton("Удалить пользователя", callback_data=f"delmenu:{proto.key}")],
             [InlineKeyboardButton("Список пользователей", callback_data=f"list:{proto.key}")],
             [InlineKeyboardButton("« Протоколы", callback_data="menu")],
@@ -187,6 +189,63 @@ async def on_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ),
         parse_mode="HTML",
     )
+
+
+# ---------- Повторная выдача конфига ----------
+# Нужна, когда конфиги уже существующих клиентов переписаны на сервере и их надо
+# разослать заново — например после смены формата обфускации (amneziawg/migrate.sh).
+# Ключи клиента при этом не меняются, поэтому пересоздавать его не нужно.
+async def on_conf_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update):
+        return await deny(update)
+    q = update.callback_query
+    await q.answer()
+    proto = get_proto(q.data.split(":", 1)[1])
+    if not proto:
+        return await q.edit_message_text("Неизвестный протокол.", reply_markup=main_menu())
+    names = list_client_names(proto)
+    back = [[InlineKeyboardButton("« Назад", callback_data=f"proto:{proto.key}")]]
+    if not names:
+        return await q.edit_message_text("Клиентов пока нет.", reply_markup=InlineKeyboardMarkup(back))
+    rows = [[InlineKeyboardButton(n, callback_data=f"conf:{proto.key}:{n}")] for n in names]
+    rows += back
+    await q.edit_message_text(
+        f"{proto.label}: чей конфиг выдать?", reply_markup=InlineKeyboardMarkup(rows)
+    )
+
+
+async def on_conf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update):
+        return await deny(update)
+    q = update.callback_query
+    await q.answer()
+    _, key, name = q.data.split(":", 2)
+    proto = get_proto(key)
+    if not proto or not NAME_RE.match(name):
+        return await q.edit_message_text("Некорректный запрос.", reply_markup=main_menu())
+
+    back = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("« Назад", callback_data=f"proto:{proto.key}")]]
+    )
+    client_dir = Path(proto.clients_dir) / name
+    conf = client_dir / f"{name}.conf"
+    qr = client_dir / f"{name}.png"
+    if not conf.is_file():
+        return await q.edit_message_text(
+            f"Файл конфигурации для <b>{html.escape(name)}</b> не найден.",
+            reply_markup=back, parse_mode="HTML",
+        )
+
+    await q.edit_message_text(
+        f"Конфиг для <b>{html.escape(name)}</b> ({proto.label}):", parse_mode="HTML"
+    )
+    chat_id = update.effective_chat.id
+    if qr.is_file():
+        with open(qr, "rb") as f:
+            await context.bot.send_photo(chat_id, f, caption=f"{proto.label}: QR для {name}")
+    with open(conf, "rb") as f:
+        await context.bot.send_document(chat_id, f, filename=f"{name}.conf")
+    await context.bot.send_message(chat_id, "Готово.", reply_markup=back)
 
 
 # ---------- Удаление ----------
@@ -320,6 +379,9 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^menu$"))
     app.add_handler(CallbackQueryHandler(on_proto, pattern=r"^proto:"))
     app.add_handler(CallbackQueryHandler(on_list, pattern=r"^list:"))
+    # confmenu: не перехватывается паттерном ^conf: — после "conf" там идёт "m", а не ":"
+    app.add_handler(CallbackQueryHandler(on_conf_menu, pattern=r"^confmenu:"))
+    app.add_handler(CallbackQueryHandler(on_conf, pattern=r"^conf:"))
     app.add_handler(CallbackQueryHandler(on_del_menu, pattern=r"^delmenu:"))
     app.add_handler(CallbackQueryHandler(on_del, pattern=r"^del:"))
 
